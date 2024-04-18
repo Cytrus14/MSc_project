@@ -1,0 +1,11 @@
+git_token
+**/__pycache__/
+**/.ipynb_checkpoints/
+Chroma_backup/
+data_archives/
+LoRA_backup/
+Notebooks/chroma_data/
+Notebooks/data/csv/
+Notebooks/data/parquet/
+Notebooks/fine_tuning/
+temp_wiki_repo-master/
