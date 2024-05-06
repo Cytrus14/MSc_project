@@ -53,13 +53,30 @@ class RAGPipeline:
                     filtered_data.append(doc)
             return filtered_data
         else:
+            return []
             return docs
+
+    def _add_id_to_doc_metadata(self, input_docs):
+        output_docs = []
+        for idx, doc in enumerate(input_docs):
+            doc[0].metadata['ID'] = idx
+            output_docs.append(doc)
+        return output_docs
     
-    def _format_docs_for_LLM(self, docs):
+    def format_docs_for_LLM(self, docs):
         formated_documents = ""
-        for idx, doc in enumerate(docs):
-            page_content = "ID {}:\n".format(idx)
+        for doc in docs:
+            page_content = "ID {}:\n".format(doc[0].metadata['ID'])
             page_content += "Title: {}\n".format(doc[0].metadata['title'])
+            page_content += doc[0].page_content.replace("search_document: ", '', 1)
+            page_content += "\n\n"
+            formated_documents += page_content
+        return formated_documents
+
+    def format_doc_for_LLM_no_ids(self, docs):
+        formated_documents = ""
+        for doc in docs:
+            page_content = "Title: {}\n".format(doc[0].metadata['title'])
             page_content += doc[0].page_content.replace("search_document: ", '', 1)
             page_content += "\n\n"
             formated_documents += page_content
@@ -70,6 +87,12 @@ class RAGPipeline:
         keywords = self._extract_keywords(prompt)
         filtered_docs = self._contains_keywords_filter(keywords, docs_with_score)
         filtered_docs = filtered_docs[:8]
-        data = self._format_docs_for_LLM(filtered_docs)
-        return data
+        
+        # for doc in filtered_docs:
+        #     print(doc[1])
+            
+        filtered_docs = self._add_id_to_doc_metadata(filtered_docs)
+        # data = self._format_docs_for_LLM(filtered_docs)
+        # return data
+        return filtered_docs
 
