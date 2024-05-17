@@ -32,15 +32,21 @@ class RAGPipeline:
     def _extract_keywords(self, string):
         # Extract keywords from the prompt
         doc = self.nlp(string)
-        keywords = []
+        keywords = set()
         for chunk in doc.noun_chunks:
             if not chunk.text.lower().strip() in nltk.corpus.stopwords.words('english'):
-                text = chunk.text
-                # Remove indirect articles
-                text = text.replace('a ', '').replace('an ', '').strip()
-                keywords.append(text)
+                text_doc = self.nlp(chunk.text)
+                # Remove indirect articles and convert to lowercase
+                text_words = [token.text for token in text_doc if not token.is_stop]
+                text = ' '.join(text_words)
+                # Keyword must be longer than 2 chars to be valid
+                if len(text) > 2:
+                    keywords.add(text.lower())
         # Convert keywords to their singular forms
+        keywords = list(keywords)
         keywords_singular = [self.lemmatizer.lemmatize(word) for word in keywords]
+        # print('Extracted keywords:')
+        # print(keywords_singular)
         return keywords_singular
     
     def _contains_keywords_filter(self, keywords, docs):
@@ -48,13 +54,12 @@ class RAGPipeline:
         filtered_data = []
         if len(keywords) > 0:
             for doc in docs:
-                el = doc[0].page_content
+                el = doc[0].page_content.lower()
                 if any(keyword in el for keyword in keywords):
                     filtered_data.append(doc)
             return filtered_data
         else:
             return []
-            return docs
 
     def _add_id_to_doc_metadata(self, input_docs):
         output_docs = []

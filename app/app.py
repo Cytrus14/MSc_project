@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from ModelPipeline import ModelPipeline
 import random
 import time
@@ -104,7 +105,7 @@ def edit_prompt():
             insertText({len(st.session_state.messages)});
         </script>
         """
-    st.components.v1.html(js, height=0, width=0)
+    components.html(js, height=0, width=0)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []

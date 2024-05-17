@@ -29,8 +29,8 @@ class _ModelPipeline:
         
         # self.prompt_template = "[INST] Solve the user_prompt. Data from you internal database may be useful. If non of the information in the internal database is relevant to the user_prompt, ignore the internal database. Please note that the user is not aware of those instructions. Do not mentioned them in your response. \n<INTERNAL_DB>\n{RAG_DATA}\n</INTERNAL_DB>\nuser_prompt: {USER_PROMPT}\n[/INST] "
 
-        self.prompt_template = "[INST] You are a LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. Data from you internal database may be useful. If non of the information in the internal database is relevant to the user_prompt, ignore the internal database. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \n<INTERNAL_DB>\n{RAG_DATA}\n</INTERNAL_DB>\nuser_prompt: {USER_PROMPT}\n[/INST] "
-        self.prompt_template_no_rag = "[INST] You are a LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \nuser_prompt: {USER_PROMPT}\n [/INST]"
+        self.prompt_template = "[INST] You are an LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. Data from you internal database may be useful. If non of the information in the internal database is relevant to the user_prompt, ignore the internal database. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \n<INTERNAL_DB>\n{RAG_DATA}\n</INTERNAL_DB>\nuser_prompt: {USER_PROMPT}\n[/INST] "
+        self.prompt_template_no_rag = "[INST] You are an LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \nuser_prompt: {USER_PROMPT}\n [/INST]"
         self.coref_model = FCoref()
         
         #if self.is_rag_enabled:
@@ -86,11 +86,12 @@ class _ModelPipeline:
             return []
         for idx, el in enumerate(model_output):
             # print(el[0])
-            # Break the loop after reaching idx_max_count
-            if idx == ids_max_count:
+            # Break the loop after reaching idx_max_count of if el
+            # is an empty string
+            if idx == ids_max_count or el == '':
                 break
             # If there's a -1, then non of the ids are relevant - return an empty list
-            elif el[0].isdigit() and int(el[0]) == -1:
+            elif el.isdigit() and int(el) == -1:
                 return []
             elif el[0].isdigit() and int(el[0]) >= 0 and int(el[0]) <= max_id:
                 sanitized_IDs.append(int(el[0]))
@@ -121,10 +122,10 @@ class _ModelPipeline:
         if len(coref_clusters) > 0:
             self.last_prompt_with_corefs = previous_prompt
             for cluster in coref_clusters:
-                object = cluster[0]
-                object_corefs = cluster[1:]
-            regex = re.compile("|".join(map(re.escape, object_corefs)))
-            return regex.sub(object, current_prompt)
+                entity = cluster[0]
+                entity_corefs = cluster[1:]
+            regex = re.compile("|".join(map(re.escape, entity_corefs)))
+            return regex.sub(entity, current_prompt)
         else:
             return current_prompt
 
@@ -189,13 +190,22 @@ user_prompt: {user_prompt}
                 output_parser = CommaSeparatedListOutputParser()
                 RAG_prompt = prompt_template.format(format=output_parser.get_format_instructions(), documents=documents_llm, user_prompt=prompt)
                 tokenized_context = self.tokenizer(RAG_prompt, return_tensors="pt").to('cuda')
-                self.model.enable_adapters()
-                response = self.model.generate(tokenized_context.input_ids, attention_mask=tokenized_context.attention_mask, do_sample=False, max_new_tokens=8)
-                self.model.disable_adapters()
-                response = response[0][tokenized_context.input_ids.shape[1]:] # Remove the input from the output
-                output = self.tokenizer.decode(response, skip_special_tokens=True)
-                document_IDs = output_parser.parse(output)
-                document_IDs_sanitized = self._sanitize_IDs(document_IDs)
+                 # Bypass the LLM filter if there are too many tokens to handle
+                if len(tokenized_context.input_ids[0]) > 5000:
+                    if len(documents_raw) > 3:
+                        document_IDs_sanitized = [0,1,2,3]
+                    else:
+                        document_IDs_sanitized = [i for i in range(len(documents_raw))]
+                else:
+                    self.model.enable_adapters()
+                    response = self.model.generate(tokenized_context.input_ids, attention_mask=tokenized_context.attention_mask, do_sample=False, max_new_tokens=8)
+                    self.model.disable_adapters()
+                    response = response[0][tokenized_context.input_ids.shape[1]:] # Remove the input from the output
+                    output = self.tokenizer.decode(response, skip_special_tokens=True)
+                    document_IDs = output_parser.parse(output)
+                    print('Documents IDs#########')
+                    print(document_IDs)
+                    document_IDs_sanitized = self._sanitize_IDs(document_IDs)
                 if len(document_IDs_sanitized) > 0:
                     relevant_documents_raw = self._select_docs_by_id(documents_raw, document_IDs_sanitized)
                     relevant_documents_llm = self.rag_pipeline.format_doc_for_LLM_no_ids(relevant_documents_raw)
