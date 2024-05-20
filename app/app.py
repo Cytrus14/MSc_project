@@ -68,8 +68,8 @@ def regenerate():
     # st.session_state.context = st.session_state.context[:index]
     # st.session_state.context += MODEL_START_TOKEN
     st.session_state.context = ModelPipeline.clear_previous_response_and_prompt(st.session_state.context)
-    print("Context:#########################")
-    print(st.session_state.context)
+    # print("Context:#########################")
+    # print(st.session_state.context)
     with placeholder2.container():
         with st.chat_message(ai_name, avatar=ai_avatar_path):
             response = st.write_stream(ModelPipeline.gen_response(st.session_state.prompt, st.session_state.context, st.session_state.is_rag_enabled))

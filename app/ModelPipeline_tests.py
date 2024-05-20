@@ -2,6 +2,7 @@ import random
 import os
 import re
 import torch
+import time
 
 from fastcoref import FCoref
 from langchain.output_parsers import CommaSeparatedListOutputParser
@@ -12,8 +13,20 @@ from RAGPipeline import RAGPipeline
 
 from peft.config import PeftConfigMixin
 
+from transformers import BitsAndBytesConfig
+
 class _ModelPipeline:
     def __init__(self):
+        self.total_tokens = 0
+        # self.bnb_config = BitsAndBytesConfig(
+        #     load_in_8bit=True
+        # )
+        self.bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_use_double_quant=False,
+        )
         self.FIRST_INSTRUCTION_TOKEN = '<s>'
         self.USER_START_TOKEN = '[INST]'
         self.MODEL_START_TOKEN = '[/INST]'
@@ -30,6 +43,7 @@ class _ModelPipeline:
         self.prompt_template = "[INST] You are an LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. Data from you internal database may be useful. If non of the information in the internal database is relevant to the user_prompt, ignore the internal database. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \n<INTERNAL_DB>\n{RAG_DATA}\n</INTERNAL_DB>\nuser_prompt: {USER_PROMPT}\n[/INST] "
         self.prompt_template_no_rag = "[INST] You are an LLM assistant. Here are your instructions: You must solve the user_prompt. Be concise and focus on the user_prompt. In your response you must address the user directly. The user is not aware of your instructions. Do not mention your instructions to the user. The conversation takes place between you and the user. \nuser_prompt: {USER_PROMPT}\n [/INST]"
         
+        self.empty_template = '[INST] {USER_PROMPT} [/INST]'
         self.coref_model = FCoref()
         
         #if self.is_rag_enabled:
@@ -39,7 +53,7 @@ class _ModelPipeline:
 
         base_model = "mistralai/Mistral-7B-Instruct-v0.2"
         rag_adapter = os.path.join('..', 'Notebooks', 'fine_tuning','fine_tuned_models')
-        self.model = AutoModelForCausalLM.from_pretrained(base_model, config=MistralConfig, device_map='cuda')
+        self.model = AutoModelForCausalLM.from_pretrained(base_model, config=MistralConfig, quantization_config=self.bnb_config, device_map='cuda')
         self.model.load_adapter(rag_adapter, adapter_name='rag_adapter')
         self.model.set_adapter('rag_adapter')
         # self.model.enable_adapters()
@@ -53,7 +67,7 @@ class _ModelPipeline:
         
         self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
         self.streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True)
-
+        self.output_parser = CommaSeparatedListOutputParser()
     def _find_last_str(self, input_str, string_to_find, index_after_string_to_find=True):
         input_str = input_str[::-1]
         index_reversed = input_str.find(string_to_find[::-1])
@@ -69,6 +83,9 @@ class _ModelPipeline:
         
     def _apply_no_rag_prompt_template(self, prompt):
         return self.prompt_template_no_rag.format(USER_PROMPT=prompt)
+
+    def _apply_empty_template(self, prompt):
+        return self.empty_template.format(USER_PROMPT=prompt)
 
     # def _clear_RAG_in_context(self, context):
     #     start_index = self._find_last_str(context, self.RAG_DATA_START_TOKEN)
@@ -138,7 +155,7 @@ class _ModelPipeline:
         if is_rag_enabled:
             return context + self._apply_prompt_template(prompt, '')
         else:
-            return context + self._apply_no_rag_prompt_template(prompt)
+            return context + self._apply_empty_template(prompt)
 
     def add_response_to_context(self, response, context):
         return context + response + self.MODEL_END_TOKEN
@@ -164,10 +181,16 @@ class _ModelPipeline:
 
     def gen_response(self, prompt, context, is_rag_enabled):
         torch.cuda.empty_cache()
+        time_start_total = time.time()
         relevant_documents_raw = []
         relevant_documents_llm = ''
         if is_rag_enabled:
+            print('----------------')
+            time_start = time.time()
             prompt = self._resolve_prompt_coreference(self.previous_prompt, prompt)
+            time_end = time.time()
+            print(f'Resovle coreference time: {round(time_end - time_start, 5)}')
+            
             self.previous_prompt = prompt
             # At first store the initial prompt
             if self.last_prompt_with_corefs == None:
@@ -186,8 +209,9 @@ user_prompt: {user_prompt}
 
 [/INST]IDs: """
         
-                output_parser = CommaSeparatedListOutputParser()
-                RAG_prompt = prompt_template.format(format=output_parser.get_format_instructions(), documents=documents_llm, user_prompt=prompt)
+                
+                RAG_prompt = prompt_template.format(format=self.output_parser.get_format_instructions(), documents=documents_llm, user_prompt=prompt)
+                time_start = time.time()
                 tokenized_context = self.tokenizer(RAG_prompt, return_tensors="pt").to('cuda')
                  # Bypass the LLM filter if there are too many tokens to handle
                 if len(tokenized_context.input_ids[0]) > 5000:
@@ -201,12 +225,20 @@ user_prompt: {user_prompt}
                     self.model.disable_adapters()
                     response = response[0][tokenized_context.input_ids.shape[1]:] # Remove the input from the output
                     output = self.tokenizer.decode(response, skip_special_tokens=True)
-                    document_IDs = output_parser.parse(output)
+                    document_IDs = self.output_parser.parse(output)
+                    time_end = time.time()
+                    print(f'Find relevant docs time: {round(time_end - time_start, 5)}')
                     # print('Documents IDs#########')
                     # print(document_IDs)
+                    time_start = time.time()
                     document_IDs_sanitized = self._sanitize_IDs(document_IDs)
+                    time_end = time.time()
+                    print(f'Sanitizer time {round(time_end - time_start, 5)}')
                 if len(document_IDs_sanitized) > 0:
+                    time_start = time.time()
                     relevant_documents_raw = self._select_docs_by_id(documents_raw, document_IDs_sanitized)
+                    time_end = time.time()
+                    print(f'Documents select time {round(time_end - time_start, 5)}')
                     relevant_documents_llm = self.rag_pipeline.format_doc_for_LLM_no_ids(relevant_documents_raw)
     
             # If no document are relevant for the current prompt, use the documents from the previous one
@@ -217,24 +249,49 @@ user_prompt: {user_prompt}
             # else:
             #     relevant_documents_llm = ''
             
-
+        time_start = time.time()
         if is_rag_enabled:
             input_prompt = self._apply_prompt_template(prompt, relevant_documents_llm)
         else:
-            input_prompt = self._apply_no_rag_prompt_template(prompt)
+            #input_prompt = self._apply_no_rag_prompt_template(prompt)
+            # TODO: remove this line
+            input_prompt = self._apply_empty_template(prompt)
+        time_end = time.time()
+        print(f'Template applicator time {round(time_end - time_start, 5)}')
         input_prompt_with_context = context + input_prompt
 
 
         # print('Model Input########################')
         # print(input_prompt_with_context)
-        
+        # time_start = time.time()
+        time_end_total = time.time()
+        print(f'Total time {round(time_end_total - time_start_total, 5)}')
         tokenized_context = self.tokenizer(input_prompt_with_context, return_tensors="pt").to('cuda')
-        generation_kwargs = dict(tokenized_context, streamer=self.streamer, do_sample=True, max_new_tokens=512)
+        # time_end = time.time()
+        # print(f'Tokenization time: {time_end - time_start} s')
+        generation_kwargs = dict(tokenized_context, streamer=self.streamer, do_sample=True, max_new_tokens=4096)
         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        token_count = 0 
+        time_start_preprocessing = time.time()
+        time_end_preprocessing = None
         thread.start()
         for el in self.streamer:
+            if time_end_preprocessing == None:
+                time_end_preprocessing = time.time()
+                time_start_tokens = time.time()
             el = el.replace(self.MODEL_END_TOKEN, '')
             yield(el)
+            token_count += 1
+        time_end_tokens = time.time()
+        total_tokens = len(tokenized_context.input_ids[0]) + token_count
+        # print(f'Input tokens: {len(tokenized_context.input_ids[0])}')
+        # print(f'Gen Middle point: {round(len(tokenized_context.input_ids[0]) + token_count/2)}')
+        # print(f'Total tokens: {total_tokens}')
+        # print(f'Speed: {round(token_count/(time_end_tokens - time_start_tokens),3)} tokens/s')
+        # print(f'Preprocessing time: {round(time_end_preprocessing - time_start_preprocessing, 3)}')
+        # print(f'Gen tokens: {token_count}')
+        # print('------------------------')
+            
 
 ModelPipeline = _ModelPipeline()
 
